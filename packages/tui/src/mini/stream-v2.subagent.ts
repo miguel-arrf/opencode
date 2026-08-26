@@ -106,8 +106,6 @@ type ChildState = {
   status: FooterSubagentTab["status"]
   background: boolean
   title?: string
-  directory?: string
-  projectID?: string
   lastUpdatedAt: number
   frames: Frame[]
   fragments: FragmentReconciler
@@ -440,14 +438,6 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
   const blockerCurrent = (child: ChildState, epoch: number, signal = input.signal) =>
     active(signal) && epoch === blockerEpoch && children.get(child.sessionID) === child
 
-  const cancelBlockerRetry = (child: ChildState) => {
-    const timer = blockerRetryTimers.get(child.sessionID)
-    if (timer) clearTimeout(timer)
-    blockerRetryTimers.delete(child.sessionID)
-    blockerRetryAttempts.delete(child.sessionID)
-    blockerEvents.delete(child.sessionID)
-  }
-
   const resolvePermissionTools = async (
     sdk: OpenCodeClient,
     child: ChildState,
@@ -504,12 +494,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
   }
 
   function scheduleBlockerRetry(sdk: OpenCodeClient, child: ChildState, epoch: number, signal = input.signal) {
-    if (
-      !blockerCurrent(child, epoch, signal) ||
-      child.status !== "running" ||
-      child.blockersHydrated ||
-      blockerRetryTimers.has(child.sessionID)
-    )
+    if (!blockerCurrent(child, epoch, signal) || child.blockersHydrated || blockerRetryTimers.has(child.sessionID))
       return
     const attempt = blockerRetryAttempts.get(child.sessionID) ?? 0
     const delay = Math.min(BLOCKER_RETRY_INITIAL_MS * 2 ** Math.min(attempt, 30), BLOCKER_RETRY_MAX_MS)
@@ -517,7 +502,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
     const timer = setTimeout(() => {
       if (blockerRetryTimers.get(child.sessionID) !== timer) return
       blockerRetryTimers.delete(child.sessionID)
-      if (blockerCurrent(child, epoch, signal) && child.status === "running" && !child.blockersHydrated)
+      if (blockerCurrent(child, epoch, signal) && !child.blockersHydrated)
         void hydrateBlockers(sdk, child, epoch, signal)
     }, delay)
     blockerRetryTimers.set(child.sessionID, timer)
@@ -529,12 +514,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
     epoch = blockerEpoch,
     signal = input.signal,
   ): Promise<void> {
-    if (
-      !blockerCurrent(child, epoch, signal) ||
-      (child.status !== "running" && child.status !== "completed") ||
-      child.blockersHydrated
-    )
-      return Promise.resolve()
+    if (!blockerCurrent(child, epoch, signal) || child.blockersHydrated) return Promise.resolve()
     const existing = blockerHydrations.get(child.sessionID)
     if (existing) return existing
     const timer = blockerRetryTimers.get(child.sessionID)
@@ -560,7 +540,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
       .then((results) => {
         if (!blockerCurrent(child, epoch, signal)) return
         blockerEvents.delete(child.sessionID)
-        child.blockersHydrated = child.status !== "running" || results.every((result) => result.status === "fulfilled")
+        child.blockersHydrated = results.every((result) => result.status === "fulfilled")
         if (child.blockersHydrated) blockerRetryAttempts.delete(child.sessionID)
       })
       .finally(() => {
@@ -606,18 +586,16 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
             if (!child) break
             if (item.agent) child.label = Locale.titlecase(item.agent)
             child.title = item.title
-            child.directory = item.location?.directory
-            child.projectID = item.projectID
             touch(child, item.time.updated)
           }
           const child = children.get(job.sessionID)
           if (!child) return
+          const blockers = hydrateBlockers(job.sdk, child, blockerEpoch, job.signal)
           blockerEvents.set(
             job.sessionID,
             buffered.filter((event) => blockerCategory(event) !== undefined),
           )
           for (const event of buffered) reduce(child, event)
-          const blockers = hydrateBlockers(job.sdk, child, blockerEpoch, job.signal)
           input.emit()
           void blockers
           void hydrateChild(job.sdk, child, job.signal)
@@ -687,10 +665,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
     if (event.type === "session.step.started") {
       touch(child, event.created)
       if (child.label === FALLBACK_LABEL && event.data.agent) child.label = Locale.titlecase(event.data.agent)
-      if (child.status !== "running") {
-        child.status = "running"
-        child.blockersHydrated = false
-      }
+      if (child.status !== "running") child.status = "running"
       input.emit()
       return
     }
@@ -928,7 +903,6 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
       return
     }
     if (event.type === "session.execution.started") {
-      if (child.status !== "running") child.blockersHydrated = false
       child.status = "running"
       touch(child, event.created)
       input.emit()
@@ -945,7 +919,6 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
           : event.type === "session.execution.interrupted"
             ? "cancelled"
             : "error"
-      cancelBlockerRetry(child)
       touch(child, event.created)
       input.emit()
     }
@@ -1009,10 +982,8 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
         child.background = true
         child.status = "running"
       }
-      if (event.type === "session.tool.success" && !found.running && child.status === "running") {
+      if (event.type === "session.tool.success" && !found.running && child.status === "running")
         child.status = "completed"
-        cancelBlockerRetry(child)
-      }
       touch(child, event.created)
       input.emit()
       if (!child.blockersHydrated) void hydrateBlockers(sdk, child, blockerEpoch, signal)
@@ -1034,11 +1005,6 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
           hydrationEvents.set(sessionID, buffered)
         }
         reduce(child, event)
-        if (
-          (event.type === "session.execution.started" || event.type === "session.step.started") &&
-          !child.blockersHydrated
-        )
-          void hydrateBlockers(sdk, child, blockerEpoch, signal)
         return
       }
       void discover(sdk, sessionID, signal)
@@ -1082,8 +1048,6 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
           if (!child) break
           if (session.agent && child.label === FALLBACK_LABEL) child.label = Locale.titlecase(session.agent)
           if (!child.title) child.title = session.title
-          child.directory = session.location?.directory
-          child.projectID = session.projectID
           touch(child, session.time.updated)
           queue.push(session.id)
         }
@@ -1106,46 +1070,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
         if (child.status === "running" && !(child.sessionID in next.active)) child.status = "completed"
         child.blockersHydrated = false
       }
-      const worktrees = new Map<string, string[]>()
-      const projects = [
-        ...new Set(
-          [...children.values()].flatMap((child) =>
-            child.status === "completed" &&
-            input.directory &&
-            child.directory &&
-            child.directory !== input.directory &&
-            child.projectID
-              ? [child.projectID]
-              : [],
-          ),
-        ),
-      ]
-      await Promise.all(
-        projects.map(async (projectID) => {
-          const entries = await next.sdk.worktree.list({ projectID }, { signal }).catch(() => undefined)
-          if (entries)
-            worktrees.set(
-              projectID,
-              entries.map((entry) => entry.directory),
-            )
-        }),
-      )
-      if (!active(signal)) return
-      const descendants = [...children.values()].filter((child) => {
-        if (child.status === "running") return true
-        if (child.status !== "completed") return false
-        if (!input.directory || !child.directory || child.directory === input.directory || !child.projectID) return true
-        const directories = worktrees.get(child.projectID)
-        return (
-          !directories ||
-          directories.some(
-            (directory) =>
-              child.directory === directory ||
-              child.directory?.startsWith(`${directory}/`) ||
-              child.directory?.startsWith(`${directory}\\`),
-          )
-        )
-      })
+      const descendants = [...children.values()]
       for (let offset = 0; offset < descendants.length; offset += FAMILY_DISCOVERY_CONCURRENCY)
         await Promise.all(
           descendants

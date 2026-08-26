@@ -6,8 +6,8 @@ import { Session } from "@opencode-ai/core/session"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Workspace } from "@opencode-ai/core/workspace"
 import { eq } from "drizzle-orm"
-import { Effect, Layer, Schema } from "effect"
-import { HttpRouter } from "effect/unstable/http"
+import { Effect, Layer, RcMap, Schema } from "effect"
+import { HttpRouter, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiMiddleware } from "effect/unstable/httpapi"
 import { InvalidRequestError, SessionNotFoundError } from "@opencode-ai/protocol/errors"
 import type { LocationServices } from "../location"
@@ -27,7 +27,7 @@ export const sessionLocationLayer = Layer.effect(
     const { db } = yield* Database.Service
     const locations = yield* LocationServiceMap.Service
 
-    return SessionLocationMiddleware.of((effect) =>
+    return SessionLocationMiddleware.of((effect, context) =>
       Effect.gen(function* () {
         const route = yield* HttpRouter.RouteContext
         const sessionID = yield* decodeSessionID(route.params.sessionID).pipe(
@@ -51,16 +51,14 @@ export const sessionLocationLayer = Layer.effect(
             message: `Session not found: ${sessionID}`,
           })
 
-        return yield* effect.pipe(
-          Effect.provide(
-            locations.get(
-              Location.Ref.make({
-                directory: AbsolutePath.make(row.directory),
-                workspaceID: row.workspaceID ? Workspace.ID.make(row.workspaceID) : undefined,
-              }),
-            ),
-          ),
-        )
+        const location = Location.Ref.make({
+          directory: AbsolutePath.make(row.directory),
+          workspaceID: row.workspaceID ? Workspace.ID.make(row.workspaceID) : undefined,
+        })
+        if (context.endpoint.identifier === "session.permission.list" && !(yield* RcMap.has(locations.rcMap, location)))
+          return HttpServerResponse.jsonUnsafe({ data: [] })
+
+        return yield* effect.pipe(Effect.provide(locations.get(location)))
       }),
     )
   }),

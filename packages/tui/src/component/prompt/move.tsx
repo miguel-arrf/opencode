@@ -77,6 +77,7 @@ export function usePromptMove(input: { projectID: () => string | undefined; sess
         }
         onCurrentChange={setDestination}
         onSelect={(selection) => {
+          const sessionID = input.sessionID()
           if (!sessionID) {
             setDestination(selection)
             dialog.clear()

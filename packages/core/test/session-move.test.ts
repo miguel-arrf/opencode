@@ -10,13 +10,12 @@ import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
 import type { LocationServices } from "@opencode-ai/core/location-services"
 import { Project } from "@opencode-ai/core/project"
-import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
+import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Session } from "@opencode-ai/core/session"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionStore } from "@opencode-ai/core/session/store"
-import { Workspace } from "@opencode-ai/core/workspace"
 import { LayerNode } from "@opencode-ai/util/effect/layer-node"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
@@ -49,126 +48,6 @@ const itWithUnavailableDestination = testEffect(
 )
 
 describe("Session.move", () => {
-  it.effect("does not admit a move to the current location", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
-      Effect.flatMap((tmp) =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
-          const directory = AbsolutePath.make(tmp.path)
-          const created = yield* session.create({ location: Location.Ref.make({ directory }) })
-
-          yield* session.move({ sessionID: created.id, directory })
-
-          expect((yield* session.get(created.id)).location.directory).toBe(directory)
-          expect(yield* session.inbox(created.id)).toEqual([])
-        }),
-      ),
-    ),
-  )
-
-  it.effect("normalizes the requested directory before identifying a redundant move", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
-      Effect.flatMap((tmp) =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
-          const created = yield* session.create({
-            location: Location.Ref.make({ directory: AbsolutePath.make(tmp.path) }),
-          })
-
-          yield* session.move({ sessionID: created.id, directory: AbsolutePath.make(" ./ ") })
-          yield* session.move({ sessionID: created.id, directory: AbsolutePath.make(`${tmp.path}/nested/..`) })
-
-          expect(yield* session.inbox(created.id)).toEqual([])
-        }),
-      ),
-    ),
-  )
-
-  it.effect("includes workspace identity when identifying a redundant move", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
-      Effect.flatMap((tmp) =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
-          const directory = AbsolutePath.make(tmp.path)
-          const workspaceID = Workspace.ID.make("wrk_current")
-          const created = yield* session.create({ location: Location.Ref.make({ directory, workspaceID }) })
-
-          yield* session.move({ sessionID: created.id, directory, workspaceID })
-          expect(yield* session.inbox(created.id)).toEqual([])
-
-          const destinationWorkspaceID = Workspace.ID.make("wrk_destination")
-          yield* session.move({ sessionID: created.id, directory, workspaceID: destinationWorkspaceID })
-
-          expect(yield* session.inbox(created.id)).toMatchObject([
-            { type: "move", payload: { location: { directory, workspaceID: destinationWorkspaceID } } },
-          ])
-        }),
-      ),
-    ),
-  )
-
-  it.effect("admits a same-location move when its project-relative subpath changes", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
-      Effect.flatMap((tmp) =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
-          const bus = yield* Bus.Service
-          const directory = AbsolutePath.make(tmp.path)
-          const created = yield* session.create({ location: Location.Ref.make({ directory }) })
-          yield* bus.publish(SessionEvent.Moved, {
-            sessionID: created.id,
-            location: Location.Ref.make({ directory }),
-            projectID: Project.ID.global,
-            subpath: RelativePath.make("outdated"),
-          })
-
-          yield* session.move({ sessionID: created.id, directory })
-
-          expect(yield* session.inbox(created.id)).toMatchObject([
-            { type: "move", payload: { location: { directory }, projectID: Project.ID.global, subpath: "" } },
-          ])
-        }),
-      ),
-    ),
-  )
-
-  it.effect("preserves a pending move away and back to the current directory", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
-      Effect.flatMap((tmp) =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
-          const source = AbsolutePath.make(tmp.path)
-          const destination = AbsolutePath.make(path.join(tmp.path, "destination"))
-          yield* Effect.promise(() => mkdir(destination))
-          const created = yield* session.create({ location: Location.Ref.make({ directory: source }) })
-
-          yield* session.move({ sessionID: created.id, directory: destination })
-          yield* session.move({ sessionID: created.id, directory: source })
-
-          expect(yield* session.inbox(created.id)).toMatchObject([
-            { type: "move", payload: { location: { directory: destination } } },
-            { type: "move", payload: { location: { directory: source } } },
-          ])
-        }),
-      ),
-    ),
-  )
-
   itWithUnavailableDestination.effect("rejects an unavailable destination before admitting the move", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),
@@ -226,6 +105,31 @@ describe("Session.move", () => {
           })
           yield* session.move({ sessionID: steered.id, directory: destination, delivery: "queue" })
           expect(yield* session.inbox(steered.id)).toMatchObject([{ type: "move", delivery: "queue" }])
+        }),
+      ),
+    ),
+  )
+
+  it.effect("preserves a pending move away and back to the current directory", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const source = AbsolutePath.make(tmp.path)
+          const destination = AbsolutePath.make(path.join(tmp.path, "destination"))
+          yield* Effect.promise(() => mkdir(destination))
+          const created = yield* session.create({ location: Location.Ref.make({ directory: source }) })
+
+          yield* session.move({ sessionID: created.id, directory: destination })
+          yield* session.move({ sessionID: created.id, directory: source })
+
+          expect(yield* session.inbox(created.id)).toMatchObject([
+            { type: "move", payload: { location: { directory: destination } } },
+            { type: "move", payload: { location: { directory: source } } },
+          ])
         }),
       ),
     ),

@@ -680,16 +680,6 @@ const layer = Layer.effect(
         Effect.gen(function* () {
           const pending = yield* SessionInbox.nextPromotable(db, sessionID, promotable)
           if (pending?.type !== "move") return false
-          const latest = yield* getSession(sessionID)
-          if (
-            pending.payload.location.directory === latest.location.directory &&
-            pending.payload.location.workspaceID === latest.location.workspaceID &&
-            pending.payload.projectID === latest.projectID &&
-            (pending.payload.subpath ?? "") === (latest.subpath ?? "")
-          ) {
-            yield* bus.publish(SessionEvent.InboxDelivered, { sessionID, inboxID: pending.id })
-            return true
-          }
           yield* modelTransport.close(sessionID)
           yield* bus.publishAll([
             [SessionEvent.InboxDelivered, { sessionID, inboxID: pending.id }],

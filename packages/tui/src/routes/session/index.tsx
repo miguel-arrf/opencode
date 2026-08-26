@@ -3,7 +3,6 @@ import {
   createContext,
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   For,
   Index,
@@ -21,7 +20,7 @@ import { EOL, tmpdir } from "node:os"
 import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
 import { createStore } from "solid-js/store"
-import { locationKey, useData } from "../../context/data"
+import { useData } from "../../context/data"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner, SPINNER_FRAMES } from "../../component/spinner"
@@ -310,46 +309,8 @@ export function Session(props: { verticalTabsWidth: number }) {
     ),
   )
 
-  const [worktrees] = createResource(
-    () => {
-      const current = session()
-      if (!current?.projectID) return
-      const external = descendantSessionIDs().some((sessionID) => {
-        if (data.session.status(sessionID) === "running") return false
-        const child = data.session.get(sessionID)
-        return (
-          child?.projectID === current.projectID &&
-          child.location.workspaceID === current.location.workspaceID &&
-          locationKey(child.location) !== locationKey(current.location)
-        )
-      })
-      return external ? current.projectID : undefined
-    },
-    (projectID) => client.api.worktree.list({ projectID }).catch(() => null),
-  )
-  const hydratedDescendantSessionIDs = createMemo(() => {
-    const current = session()
-    if (!current) return []
-    return descendantSessionIDs().filter((sessionID) => {
-      if (data.session.status(sessionID) === "running") return true
-      const child = data.session.get(sessionID)
-      if (!child) return false
-      if (locationKey(child.location) === locationKey(current.location)) return true
-      if (child.projectID !== current.projectID || child.location.workspaceID !== current.location.workspaceID)
-        return false
-      if (worktrees() === null) return true
-      return (
-        worktrees()?.some(
-          (worktree) =>
-            child.location.directory === worktree.directory ||
-            (child.subpath !== undefined && path.join(worktree.directory, child.subpath) === child.location.directory),
-        ) ?? false
-      )
-    })
-  })
-
   createEffect(
-    on([hydratedDescendantSessionIDs, () => client.connection.status()], ([sessionIDs, status]) => {
+    on([descendantSessionIDs, () => client.connection.status()], ([sessionIDs, status]) => {
       if (status !== "connected") return
       void Promise.allSettled(
         sessionIDs.flatMap((sessionID) => [data.session.permission.sync(sessionID), data.session.form.sync(sessionID)]),

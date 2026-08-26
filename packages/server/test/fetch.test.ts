@@ -1,9 +1,12 @@
 import { expect } from "bun:test"
+import { rm } from "node:fs/promises"
 import { createServer, type Server } from "node:http"
 import { makeMemoryDriver } from "@opencode-ai/core/environment/index"
+import { Session } from "@opencode-ai/core/session"
 import { Workspace } from "@opencode-ai/core/workspace"
 import { WorkspaceDriver } from "@opencode-ai/core/workspace/driver"
 import { Effect } from "effect"
+import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
 import { ServerFetch } from "../src/fetch"
 
@@ -260,6 +263,38 @@ it.live("serves the session view operation and missing-session error", () =>
       ),
     )
     expect(missing.status).toBe(404)
+  }).pipe(Effect.scoped),
+)
+
+it.live("returns empty session blockers without starting a removed location", () =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    )
+    const handler = yield* ServerFetch.make(options)
+    const sessionID = Session.ID.create()
+    const created = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/session", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: sessionID, location: { directory: directory.path } }),
+        }),
+      ),
+    )
+    expect(created.status).toBe(200)
+    yield* Effect.promise(() => rm(directory.path, { recursive: true }))
+
+    yield* Effect.forEach(["permission", "form"] as const, (kind) =>
+      Effect.gen(function* () {
+        const response = yield* Effect.promise(() =>
+          handler(new Request(`http://opencode.local/api/session/${sessionID}/${kind}`)),
+        )
+        expect(response.status).toBe(200)
+        expect(yield* Effect.promise(() => response.json())).toEqual({ data: [] })
+      }),
+    )
   }).pipe(Effect.scoped),
 )
 
