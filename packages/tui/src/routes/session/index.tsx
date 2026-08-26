@@ -902,8 +902,14 @@ export function Session(props: {
                 const state = terminals.get(route.sessionID)
                 const terminal =
                   state?.terminals.find((item) => item.id === state.selectedTerminalID) ?? state?.terminals.at(-1)
-                if (terminal) void terminals.selectTerminal(route.sessionID, terminal.id).catch(toast.error)
-                else void terminals.newTerminal(route.sessionID).catch(toast.error)
+                if (terminal)
+                  void terminals
+                    .selectTerminal(route.sessionID, terminal.id)
+                    .catch(() => toast.show({ variant: "error", message: "Unable to load terminal" }))
+                else
+                  void terminals
+                    .newTerminal(route.sessionID)
+                    .catch(() => toast.show({ variant: "error", message: "Unable to load terminal" }))
               }
               dialog.clear()
             },
@@ -915,7 +921,9 @@ export function Session(props: {
             run: () => {
               promptRef.current?.focus()
               setComposer({ open: true, tab: "terminals" })
-              void terminals.refresh(route.sessionID).catch(toast.error)
+              void terminals
+                .refresh(route.sessionID)
+                .catch(() => toast.show({ variant: "error", message: "Unable to load terminal" }))
               dialog.clear()
             },
           },
@@ -937,7 +945,9 @@ export function Session(props: {
             slash: { name: "terminal" },
             run: async () => {
               dialog.clear()
-              await terminals.newTerminal(route.sessionID).catch(toast.error)
+              await terminals
+                .newTerminal(route.sessionID)
+                .catch(() => toast.show({ variant: "error", message: "Unable to load terminal" }))
             },
           },
         ]
