@@ -799,10 +799,18 @@ const layer = Layer.effect(
           payload,
           delivery: input.delivery ?? "steer",
         })
-        yield* SessionInbox.serialized(
+        const moved = yield* SessionInbox.serialized(
           input.sessionID,
           Effect.gen(function* () {
             const latest = yield* result.get(input.sessionID)
+            if (
+              payload.location.directory === latest.location.directory &&
+              payload.location.workspaceID === latest.location.workspaceID &&
+              payload.projectID === latest.projectID &&
+              (payload.subpath ?? "") === (latest.subpath ?? "") &&
+              (yield* SessionInbox.moveIDs(db, input.sessionID)).length === 0
+            )
+              return false
             const source = yield* fs.stat(latest.location.directory).pipe(Effect.orElseSucceed(() => undefined))
             if (!source || source.type !== "Directory") {
               const cancellations = (yield* SessionInbox.moveIDs(db, input.sessionID)).map(
@@ -810,16 +818,18 @@ const layer = Layer.effect(
               )
               const moved = [SessionEvent.Moved, { sessionID: input.sessionID, ...payload }] as const
               const first = cancellations[0]
-              if (!first) return yield* bus.publish(...moved).pipe(Effect.asVoid)
-              return yield* bus.publishAll([first, ...cancellations.slice(1), moved])
+              if (!first) return yield* bus.publish(...moved).pipe(Effect.as(true))
+              return yield* bus.publishAll([first, ...cancellations.slice(1), moved]).pipe(Effect.as(true))
             }
             yield* SessionInbox.admit(db, bus, {
               id: SessionMessage.ID.create(),
               sessionID: input.sessionID,
               item,
             })
+            return true
           }),
         )
+        if (!moved) return
         yield* execution.wake(input.sessionID)
       }),
       compact: Effect.fn("Session.compact")(function* (input) {

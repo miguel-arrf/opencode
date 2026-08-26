@@ -28,7 +28,7 @@ import { EventTable } from "@opencode-ai/core/event/sql"
 import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { Form } from "@opencode-ai/core/form"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { Session } from "@opencode-ai/core/session"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { SessionEvent } from "@opencode-ai/core/session/event"
@@ -1444,6 +1444,79 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.effect("delivers a redundant pending move without changing location or closing transport", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const inboxID = SessionMessage.ID.create()
+      yield* SessionInbox.admit(db, bus, {
+        id: inboxID,
+        sessionID,
+        item: {
+          type: "move",
+          payload: {
+            location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+            projectID: Project.ID.global,
+            subpath: RelativePath.make(""),
+          },
+          delivery: "queue",
+        },
+      })
+
+      yield* session.resume(sessionID)
+
+      expect((yield* session.get(sessionID)).location.directory).toBe(AbsolutePath.make("/project"))
+      expect(yield* session.inbox(sessionID)).toEqual([])
+      expect(yield* session.messages({ sessionID })).toEqual([])
+      expect(requests).toEqual([])
+      expect(closedTransports).toEqual([])
+      const events = yield* recordedEventTypes(sessionID)
+      expect(events).toContain(Bus.versionedType(SessionEvent.InboxDelivered.type, 1))
+      expect(events).not.toContain(Bus.versionedType(SessionEvent.Moved.type, 1))
+    }),
+  )
+
+  it.effect("applies a same-location move when project ownership changes", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const projectID = Project.ID.make("adopted")
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: projectID, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+        .pipe(Effect.orDie)
+      yield* SessionInbox.admit(db, bus, {
+        id: SessionMessage.ID.create(),
+        sessionID,
+        item: {
+          type: "move",
+          payload: {
+            location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+            projectID,
+          },
+          delivery: "queue",
+        },
+      })
+
+      yield* session.resume(sessionID)
+
+      expect(yield* session.get(sessionID)).toMatchObject({
+        projectID,
+        location: { directory: AbsolutePath.make("/project") },
+      })
+      expect(yield* session.inbox(sessionID)).toEqual([])
+      expect(
+        (yield* session.messages({ sessionID })).filter((message) => message.type === "location-switched"),
+      ).toHaveLength(1)
+      expect(requests).toEqual([])
+      expect(closedTransports).toEqual([sessionID])
+      expect(yield* recordedEventTypes(sessionID)).toContain(Bus.versionedType(SessionEvent.Moved.type, 1))
+    }),
+  )
+
   it.effect("delivers a queued move atomically at the idle boundary", () =>
     Effect.gen(function* () {
       const session = yield* setup
@@ -1478,6 +1551,41 @@ describe("SessionRunnerLLM", () => {
           .limit(2)
           .all()).map((event) => event.type),
       ).toEqual([Bus.versionedType(SessionEvent.Moved.type, 1), Bus.versionedType(SessionEvent.InboxDelivered.type, 1)])
+    }),
+  )
+
+  it.effect("applies duplicate pending moves to the same destination only once", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      yield* Effect.forEach([SessionMessage.ID.create(), SessionMessage.ID.create()], (id) =>
+        SessionInbox.admit(db, bus, {
+          id,
+          sessionID,
+          item: {
+            type: "move",
+            payload: {
+              location: Location.Ref.make({ directory: AbsolutePath.make("/moved") }),
+              projectID: Project.ID.global,
+            },
+            delivery: "queue",
+          },
+        }),
+      )
+
+      yield* session.resume(sessionID)
+
+      expect((yield* session.get(sessionID)).location.directory).toBe(AbsolutePath.make("/moved"))
+      expect(yield* session.inbox(sessionID)).toEqual([])
+      expect(
+        (yield* session.messages({ sessionID })).filter((message) => message.type === "location-switched"),
+      ).toHaveLength(1)
+      expect(requests).toEqual([])
+      expect(closedTransports).toEqual([sessionID])
+      const events = yield* recordedEventTypes(sessionID)
+      expect(events.filter((type) => type === Bus.versionedType(SessionEvent.InboxDelivered.type, 1))).toHaveLength(2)
+      expect(events.filter((type) => type === Bus.versionedType(SessionEvent.Moved.type, 1))).toHaveLength(1)
     }),
   )
 

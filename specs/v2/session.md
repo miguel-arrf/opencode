@@ -20,7 +20,7 @@ Delivery is explicit:
 
 Promoting new user input resets the selected agent's step allowance. A batch of steers resets it once.
 
-Manual compaction and Session movement use the same inbox as control items. Each request has its own inbox identity and delivery mode. A control item forms a delivery boundary so later steers do not cross it.
+Manual compaction and Session movement use the same inbox as control items. Each admitted request has its own inbox identity and delivery mode. A control item forms a delivery boundary so later steers do not cross it. A redundant move is not admitted when no earlier move is pending; an admitted move that becomes redundant before delivery is consumed without publishing a movement event.
 
 ## Execution Is Process-Local
 

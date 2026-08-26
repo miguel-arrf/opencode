@@ -382,6 +382,156 @@ test("shows jump to latest after scrolling one line above the final message", as
   }
 })
 
+test("hydrates child blockers only for known locations and running sessions", async () => {
+  const setup = await createTestRenderer({ width: 100, height: 30, useThread: false })
+  setup.renderer.start()
+  const parentVisible = Promise.withResolvers<void>()
+  const setTitle = setup.renderer.setTerminalTitle.bind(setup.renderer)
+  setup.renderer.setTerminalTitle = (title) => {
+    if (title === "OC | Parent session") parentVisible.resolve()
+    setTitle(title)
+  }
+  const activityRequested = Promise.withResolvers<void>()
+  const releaseActivity = Promise.withResolvers<void>()
+  const requests: string[] = []
+  const parent = {
+    id: "parent",
+    title: "Parent session",
+    projectID: "project",
+    location: { directory },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 0, updated: 0 },
+  }
+  const children = [
+    {
+      ...parent,
+      id: "idle-child",
+      parentID: parent.id,
+      title: "Idle child",
+    },
+    {
+      ...parent,
+      id: "idle-worktree-child",
+      parentID: parent.id,
+      title: "Idle worktree child",
+      location: { directory: `${directory}/live-worktree/src` },
+      subpath: "src",
+    },
+    {
+      ...parent,
+      id: "completed-child",
+      parentID: parent.id,
+      title: "Completed child",
+      location: { directory: `${directory}/deleted-worktree` },
+    },
+    {
+      ...parent,
+      id: "running-child",
+      parentID: parent.id,
+      title: "Running child",
+      location: { directory: `${directory}/running-worktree` },
+    },
+  ]
+  const worktreeChildHydrated = Promise.withResolvers<void>()
+  const events = createEventStream()
+  const calls = createFetch(async (url) => {
+    if (url.pathname === "/api/session/active") {
+      activityRequested.resolve()
+      await releaseActivity.promise
+      return json({ data: { "running-child": { type: "running" } } })
+    }
+    if (url.pathname === "/api/session")
+      return json({ data: url.searchParams.has("parentID") ? children : [parent], cursor: {} })
+    if (url.pathname === "/api/worktree/project")
+      return json([{ directory }, { directory: `${directory}/live-worktree`, strategy: "git" }])
+    if (url.pathname === "/api/session/parent") return json({ data: parent })
+    if (url.pathname === "/api/session/parent/message") return json({ data: [], cursor: {} })
+    if (url.pathname === "/api/session/parent/inbox") return json({ data: [] })
+    if (/^\/api\/session\/[^/]+\/(permission|form)$/.test(url.pathname)) {
+      requests.push(url.pathname)
+      if (url.pathname === "/api/session/idle-worktree-child/form") worktreeChildHydrated.resolve()
+      if (url.pathname === "/api/session/idle-child/form" || url.pathname === "/api/session/running-child/form") {
+        const child = url.pathname === "/api/session/idle-child/form" ? "idle-child" : "running-child"
+        return json({
+          data: [
+            {
+              id: `${child}-form`,
+              sessionID: child,
+              title: child === "idle-child" ? "Idle child authorization" : "Running child authorization",
+              fields: [
+                {
+                  key: "authorization",
+                  type: "external",
+                  url: "https://example.com/authorize",
+                  title: "Authorize access",
+                },
+              ],
+            },
+          ],
+        })
+      }
+      return json({ data: [] })
+    }
+  }, events)
+  const server = Bun.serve({ port: 0, fetch: (request) => calls.fetch(request) })
+
+  try {
+    const { run } = await import("../src/app")
+    const task = Effect.runPromise(
+      run({
+        app: { name: "test", version: "test", channel: "test" },
+        server: { endpoint: { url: server.url.toString() } },
+        config: { get: async () => ({ animations: false, tabs: { enabled: false } }), update: async () => ({}) },
+        packages: { resolve: async () => undefined },
+        terminalHandoff: async () => ({ renderer: setup.renderer, mode: "dark", complete: () => {} }),
+        args: { sessionID: parent.id },
+        log: () => {},
+      }).pipe(Effect.provide(AppNodeBuilder.build(Global.node)), Effect.provide(FileSystem.layerNoop({}))),
+    )
+
+    await Promise.all([
+      parentVisible.promise,
+      activityRequested.promise,
+      worktreeChildHydrated.promise,
+      setup.waitForFrame((frame) => frame.includes("Idle child authorization")),
+    ])
+    expect(requests).toContain("/api/session/idle-child/permission")
+    expect(requests).toContain("/api/session/idle-child/form")
+    expect(requests).toContain("/api/session/idle-worktree-child/permission")
+    expect(requests).toContain("/api/session/idle-worktree-child/form")
+    expect(requests).not.toContain("/api/session/completed-child/permission")
+    expect(requests).not.toContain("/api/session/completed-child/form")
+    expect(requests).not.toContain("/api/session/running-child/permission")
+    expect(requests).not.toContain("/api/session/running-child/form")
+
+    events.emit({
+      id: "evt_idle_child_form_cancelled",
+      created: 1,
+      type: "form.cancelled",
+      data: { sessionID: "idle-child", id: "idle-child-form" },
+    })
+    await setup.waitForFrame((frame) => !frame.includes("Idle child authorization"))
+
+    releaseActivity.resolve()
+    await setup.waitForFrame((frame) => frame.includes("Running child authorization"))
+
+    expect(requests).toContain("/api/session/parent/permission")
+    expect(requests).toContain("/api/session/parent/form")
+    expect(requests).toContain("/api/session/running-child/permission")
+    expect(requests).toContain("/api/session/running-child/form")
+    expect(requests).not.toContain("/api/session/completed-child/permission")
+    expect(requests).not.toContain("/api/session/completed-child/form")
+
+    setup.renderer.destroy()
+    await task
+  } finally {
+    releaseActivity.resolve()
+    if (!setup.renderer.isDestroyed) setup.renderer.destroy()
+    await server.stop()
+  }
+})
+
 test("new session inherits the active session model", async () => {
   const setup = await createTestRenderer({ width: 80, height: 24, useThread: false, kittyKeyboard: true })
   setup.renderer.start()

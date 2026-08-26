@@ -135,11 +135,20 @@ function sdk(input: {
   streams: ReturnType<typeof feed>[]
   active?: () => Record<string, { type: "running" }>
   messages?: Record<string, SessionMessages>
-  sessions?: Array<{ id: string; parentID?: string; title?: string; agent?: string; time: { updated: number } }>
+  sessions?: Array<{
+    id: string
+    parentID?: string
+    projectID?: string
+    title?: string
+    agent?: string
+    location?: { directory: string; workspaceID?: string }
+    time: { updated: number }
+  }>
   forms?: Record<string, FormInfo[]>
   globals?: FormInfo[]
   globalLocation?: { directory: string; workspaceID?: string }
   permissions?: Record<string, PermissionRequest[]>
+  worktrees?: Record<string, Array<{ directory: string }>>
   pending?: Record<string, Awaited<ReturnType<OpenCodeClient["session"]["inbox"]["list"]>>>
   wait?: () => Promise<void>
 }) {
@@ -186,6 +195,7 @@ function sdk(input: {
   })
   spyOn(client.session, "switchAgent").mockImplementation(() => ok(undefined))
   spyOn(client.session, "switchModel").mockImplementation(() => ok(undefined))
+  spyOn(client.worktree, "list").mockImplementation((request) => ok(input.worktrees?.[request.projectID] ?? []))
   // The generated methods have conditional return types for throwOnError; the
   // minimal shapes below are enough for family discovery and model fallback.
   spyOn(client.session, "list").mockImplementation((request) => {
@@ -355,6 +365,7 @@ describe("V2 mini transport", () => {
     events.push(connected())
     const client = sdk({
       streams: [events],
+      active: () => ({ ses_child: { type: "running" }, ses_grandchild: { type: "running" } }),
       sessions: [
         { id: "ses_child", parentID: "ses_1", title: "Child", time: { updated: 2 } },
         { id: "ses_grandchild", parentID: "ses_child", title: "Grandchild", time: { updated: 1 } },
@@ -421,6 +432,7 @@ describe("V2 mini transport", () => {
     }
     const client = sdk({
       streams: [events],
+      active: () => ({ ses_child: { type: "running" } }),
       sessions: [{ id: "ses_child", parentID: "ses_1", title: "Child", time: { updated: 1 } }],
       permissions: { ses_child: [permission] },
       messages: {
@@ -567,6 +579,50 @@ describe("V2 mini transport", () => {
       type: "stream.view",
       view: { type: "prompt" },
     })
+    await transport.close()
+  })
+
+  test("cancels scheduled blocker retries when an active child completes", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      active: () => ({ ses_child: { type: "running" } }),
+      sessions: [{ id: "ses_child", parentID: "ses_1", title: "Child", time: { updated: 1 } }],
+    })
+    const permissions = spyOn(client.permission, "list").mockImplementation((request) =>
+      request.sessionID === "ses_child" ? Promise.reject(new Error("worktree unavailable")) : ok([]),
+    )
+    const forms = spyOn(client.form, "list").mockImplementation((request) =>
+      request.sessionID === "ses_child" ? Promise.reject(new Error("worktree unavailable")) : ok([]),
+    )
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+
+    events.push({
+      id: "evt_child_completed",
+      created: 2,
+      type: "session.execution.succeeded",
+      durable: durable("ses_child"),
+      data: { sessionID: "ses_child" },
+    })
+    while (
+      !ui.events.some(
+        (event) =>
+          event.type === "stream.subagent" &&
+          event.state.tabs.some((tab) => tab.sessionID === "ses_child" && tab.status === "completed"),
+      )
+    )
+      await Bun.sleep(0)
+    await Bun.sleep(80)
+
+    expect(permissions.mock.calls.filter(([request]) => request.sessionID === "ses_child")).toHaveLength(1)
+    expect(forms.mock.calls.filter(([request]) => request.sessionID === "ses_child")).toHaveLength(1)
     await transport.close()
   })
 
@@ -1346,6 +1402,7 @@ describe("V2 mini transport", () => {
     const first = sdk({ streams: [firstEvents] })
     const second = sdk({
       streams: [secondEvents],
+      active: () => ({ ses_child: { type: "running" } }),
       sessions: [{ id: "ses_child", parentID: "ses_1", title: "Child", time: { updated: 2 } }],
       forms: { ses_child: [form("frm_child", "ses_child")] },
     })
@@ -3991,6 +4048,146 @@ describe("V2 mini transport", () => {
         status: "completed",
       },
     ])
+    await transport.close()
+  })
+
+  test("hydrates retained blockers for completed children in available locations", async () => {
+    const events = feed()
+    events.push(connected())
+    const permission: PermissionRequest = {
+      id: "per_child_idle",
+      sessionID: "ses_child_idle",
+      action: "shell",
+      resources: ["git status --short"],
+    }
+    const client = sdk({
+      streams: [events],
+      sessions: [
+        {
+          id: "ses_child_idle",
+          parentID: "ses_1",
+          projectID: "proj_1",
+          location: { directory: "/work" },
+          time: { updated: 3 },
+        },
+        {
+          id: "ses_child_worktree",
+          parentID: "ses_1",
+          projectID: "proj_1",
+          location: { directory: "/worktree/src" },
+          time: { updated: 2 },
+        },
+        {
+          id: "ses_child_windows",
+          parentID: "ses_1",
+          projectID: "proj_1",
+          location: { directory: "C:\\worktree\\src" },
+          time: { updated: 1 },
+        },
+      ],
+      permissions: { ses_child_idle: [permission] },
+      forms: {
+        ses_child_worktree: [form("frm_child_idle", "ses_child_worktree")],
+        ses_child_windows: [form("frm_child_windows", "ses_child_windows")],
+      },
+      worktrees: { proj_1: [{ directory: "/work" }, { directory: "/worktree" }, { directory: "C:\\worktree" }] },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/work" },
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+
+    const snapshot = ui.events.flatMap((event) => (event.type === "stream.subagent" ? [event.state] : [])).at(-1)
+    expect(snapshot?.tabs).toMatchObject([
+      { sessionID: "ses_child_idle", status: "completed" },
+      { sessionID: "ses_child_worktree", status: "completed" },
+      { sessionID: "ses_child_windows", status: "completed" },
+    ])
+    expect(snapshot?.permissions.map((item) => item.id)).toEqual(["per_child_idle"])
+    expect(snapshot?.forms.map((item) => item.id)).toEqual(["frm_child_idle", "frm_child_windows"])
+    expect(client.worktree.list).toHaveBeenCalledWith({ projectID: "proj_1" }, { signal: expect.any(AbortSignal) })
+    await transport.close()
+  })
+
+  test("does not request or retry blockers for completed children in deleted worktrees", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      sessions: [
+        {
+          id: "ses_child_old",
+          parentID: "ses_1",
+          projectID: "proj_1",
+          title: "Earlier subagent",
+          location: { directory: "/worktree-deleted/src" },
+          time: { updated: 9 },
+        },
+      ],
+      worktrees: { proj_1: [{ directory: "/work" }, { directory: "/worktree" }] },
+    })
+    const permissions = spyOn(client.permission, "list").mockImplementation((request) =>
+      request.sessionID === "ses_child_old" ? Promise.reject(new Error("worktree unavailable")) : ok([]),
+    )
+    const forms = spyOn(client.form, "list").mockImplementation((request) =>
+      request.sessionID === "ses_child_old" ? Promise.reject(new Error("worktree unavailable")) : ok([]),
+    )
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/work" },
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+
+    expect(
+      ui.events.flatMap((event) => (event.type === "stream.subagent" ? [event.state] : [])).at(-1)?.tabs,
+    ).toMatchObject([{ sessionID: "ses_child_old", status: "completed" }])
+    expect(client.worktree.list).toHaveBeenCalledWith({ projectID: "proj_1" }, { signal: expect.any(AbortSignal) })
+    await Bun.sleep(80)
+    expect(permissions.mock.calls.filter(([request]) => request.sessionID === "ses_child_old")).toHaveLength(0)
+    expect(forms.mock.calls.filter(([request]) => request.sessionID === "ses_child_old")).toHaveLength(0)
+    await transport.close()
+  })
+
+  test("attempts completed child blocker hydration only once when worktree lookup fails", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      sessions: [
+        {
+          id: "ses_child_old",
+          parentID: "ses_1",
+          projectID: "proj_1",
+          location: { directory: "/missing-worktree" },
+          time: { updated: 1 },
+        },
+      ],
+    })
+    spyOn(client.worktree, "list").mockImplementation(() => Promise.reject(new Error("registry unavailable")))
+    const permissions = spyOn(client.permission, "list").mockImplementation((request) =>
+      request.sessionID === "ses_child_old" ? Promise.reject(new Error("worktree unavailable")) : ok([]),
+    )
+    const forms = spyOn(client.form, "list").mockImplementation((request) =>
+      request.sessionID === "ses_child_old" ? Promise.reject(new Error("worktree unavailable")) : ok([]),
+    )
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/work" },
+      sessionID: "ses_1",
+      thinking: false,
+      footer: footer().api,
+    })
+
+    await Bun.sleep(80)
+    expect(permissions.mock.calls.filter(([request]) => request.sessionID === "ses_child_old")).toHaveLength(1)
+    expect(forms.mock.calls.filter(([request]) => request.sessionID === "ses_child_old")).toHaveLength(1)
     await transport.close()
   })
 
